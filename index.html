@@ -188,10 +188,19 @@
       <div class="field">
         <label>Auto-Throttle</label>
         <div class="opts" id="autoOpts">
-          <div class="opt on" data-v="1">On</div>
-          <div class="opt" data-v="0">Off</div>
+          <div class="opt" data-v="1">On</div>
+          <div class="opt on" data-v="0">Off</div>
         </div>
-        <div class="mini">On = kart cruises by itself; just steer &amp; shoot. Great for younger drivers.</div>
+        <div class="mini">Off = gas to go, release to coast, brake to stop. On = kart cruises itself (easy mode for younger drivers).</div>
+      </div>
+
+      <div class="field">
+        <label>Time of Day</label>
+        <div class="opts" id="todOpts">
+          <div class="opt on" data-v="day">Day</div>
+          <div class="opt" data-v="night">Night</div>
+        </div>
+        <div class="mini">Night dims the arena and switches on kart headlights.</div>
       </div>
 
       <div class="field">
@@ -201,6 +210,15 @@
           <div class="opt on" data-v="1">Normal</div>
           <div class="opt" data-v="1.35">Twitchy</div>
         </div>
+      </div>
+
+      <div class="field">
+        <label>Invert Steering</label>
+        <div class="opts" id="invertOpts">
+          <div class="opt on" data-v="0">Off</div>
+          <div class="opt" data-v="1">On</div>
+        </div>
+        <div class="mini">If right turns left for you, flip this.</div>
       </div>
 
       <div class="field">
@@ -311,8 +329,8 @@ import * as THREE from 'three';
 
 // ---------- config gathered from menu ----------
 const CFG = {
-  mode:'ffa', arena:'stadium', players:6, view:'chase', autoGas:1,
-  steer:1, assist:1, winScore:15, room:'----'
+  mode:'ffa', arena:'stadium', players:6, view:'chase', autoGas:0,
+  steer:1, assist:1, winScore:15, room:'----', tod:'day', invert:0
 };
 const HP_MAX=100;
 const TEAM_COLORS={ A:0xff5a1f, B:0x22d3ee };
@@ -338,7 +356,9 @@ bindOpts('modeOpts','mode');
 bindOpts('arenaOpts','arena');
 bindOpts('viewOpts','view');
 bindOpts('autoOpts','autoGas',Number);
+bindOpts('todOpts','tod');
 bindOpts('steerOpts','steer',Number);
+bindOpts('invertOpts','invert',Number);
 bindOpts('assistOpts','assist',Number);
 bindOpts('scoreOpts','winScore',Number);
 const pc=document.getElementById('pcount');
@@ -376,6 +396,27 @@ sun.shadow.mapSize.set(2048,2048);
 sun.shadow.camera.near=1; sun.shadow.camera.far=220;
 sun.shadow.camera.left=-95; sun.shadow.camera.right=95; sun.shadow.camera.top=95; sun.shadow.camera.bottom=-95;
 scene.add(sun);
+
+// headlight for the local kart (used at night); aimed each frame in the loop
+const headlight=new THREE.SpotLight(0xfff0cc, 0, 60, Math.PI/5.5, 0.5, 1.2);
+headlight.castShadow=false;
+const headlightTarget=new THREE.Object3D(); scene.add(headlightTarget);
+headlight.target=headlightTarget; scene.add(headlight);
+
+function applyTimeOfDay(){
+  if(CFG.tod==='night'){
+    scene.background.setHex(0x05070d);
+    scene.fog.color.setHex(0x05070d); scene.fog.near=36; scene.fog.far=150;
+    hemi.color.setHex(0x35507a); hemi.groundColor.setHex(0x0a0e16); hemi.intensity=0.32;
+    sun.color.setHex(0x9fb4e0); sun.intensity=0.45; sun.position.set(-30,60,-25);
+  } else {
+    scene.background.setHex(0x9ec3ef);
+    scene.fog.color.setHex(0xaecbef); scene.fog.near=85; scene.fog.far=270;
+    hemi.color.setHex(0xbfd4ff); hemi.groundColor.setHex(0x20242e); hemi.intensity=0.95;
+    sun.color.setHex(0xfff2e0); sun.intensity=1.45; sun.position.set(40,70,30);
+  }
+}
+applyTimeOfDay();
 
 window.addEventListener('resize',()=>{
   camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
@@ -589,6 +630,7 @@ function makeKart(team,isBot,name){
     boost:0, boostTime:0, driftDir:0, drifting:false,
     score:0, spin:0,
     aiSteer:0, aiThrottle:1, aiRepath:0, aiTarget:null, aiNextShot:0, aiMine:0,
+    _reverseUntil:0, _stuck:0,
     rammedAt:{}
   };
 }
@@ -609,6 +651,7 @@ function spawnPoint(team,idx){
 function setupMatch(){
   matchNumber++; BOT_DIFF=Math.min(1,0.25*matchNumber);
   GAME.teamMode=CFG.mode!=='ffa';
+  applyTimeOfDay();
   buildArena();
   GAME.karts.forEach(k=>{scene.remove(k.group); if(k.hpGroup)scene.remove(k.hpGroup);});
   GAME.karts=[];
@@ -880,8 +923,15 @@ function inRect(p,pad,x,z,w,d){ return p.x>x-w/2-pad&&p.x<x+w/2+pad&&p.z>z-d/2-p
 function driveKart(k,dt,steerIn,throttle,drift){
   // --- engine / forward speed ---
   if(throttle>0){ k.fwd += ENGINE*throttle*dt; }
-  else if(throttle<0){ if(k.fwd>0) k.fwd-=BRAKE*dt; else k.fwd-=ENGINE*0.45*dt; }
-  else { k.fwd -= k.fwd*Math.min(1,1.2*dt); } // coast drag
+  else if(throttle<0){
+    if(k.fwd>0.4){ k.fwd-=BRAKE*dt; }          // brake hard while rolling forward
+    else { k.fwd-=ENGINE*0.5*dt; }             // then ease into reverse
+  } else {
+    const fr=16*dt;                            // coast friction → comes to a real stop
+    if(k.fwd>0) k.fwd=Math.max(0,k.fwd-fr); else k.fwd=Math.min(0,k.fwd+fr);
+  }
+  // settle to a dead stop instead of creeping forever
+  if(throttle<=0 && Math.abs(k.fwd)<0.35){ k.fwd=0; k.vel.x*=0.6; k.vel.z*=0.6; }
   if(k.boostTime>0){k.boostTime-=dt;}
   const maxNow=MAXSPD*(k.boostTime>0?1.6:1);
   k.fwd=Math.max(-REVMAX,Math.min(maxNow,k.fwd));
@@ -973,9 +1023,9 @@ function updateLocal(dt){
     if(keys['ArrowDown']||keys['KeyS'])throttle=-1;
     if(CFG.autoGas&&throttle===0)throttle=1;
   }
-  // chase cam looks down +heading; increasing yaw swings the nose toward screen-left,
-  // so negate the player's input to make right = right and left = left on screen.
-  steerIn = -steerIn * CFG.steer;
+  // chase cam looks down +heading; the screen-correct turn is -steerIn. The Invert
+  // Steering toggle flips it for anyone whose setup reads the other way.
+  steerIn = (CFG.invert? steerIn : -steerIn) * CFG.steer;
   const drift=driftHeld||keys['ShiftLeft']||keys['ShiftRight'];
   driveKart(k,dt,steerIn,throttle,drift);
   if(firing||fireQueued){ fireWeapon(k); fireQueued=false; }
@@ -1032,7 +1082,14 @@ function updateBot(k,dt){
   const dist=Math.hypot(goal.x-k.pos.x,goal.z-k.pos.z);
   if(goalIsEnemy && dist<10) throttle=0.4;            // ease off to brawl
   if(Math.abs(dy)>1.5 && Math.abs(k.fwd)>10) throttle=-0.2; // hard turn → tap brake
-  const drift = Math.abs(dy)>0.9 && Math.abs(k.fwd)>11 && d>0.4;
+
+  // ---- stuck recovery: if pinned (barely moving while trying to drive), back up & turn ----
+  if(!k._sp) k._sp=new THREE.Vector3();
+  const moved=Math.hypot(k.pos.x-k._sp.x, k.pos.z-k._sp.z); k._sp.set(k.pos.x,0,k.pos.z);
+  if(moved<0.05 && k._reverseUntil<now){ k._stuck=(k._stuck||0)+dt; } else if(now>k._reverseUntil) k._stuck=0;
+  if((k._stuck||0)>0.35 && now>k._reverseUntil){ k._reverseUntil=now+0.8; k._revTurn=(Math.random()<0.5?-1:1); k._stuck=0; }
+  let drift = Math.abs(dy)>0.9 && Math.abs(k.fwd)>11 && d>0.4;
+  if(now<(k._reverseUntil||0)){ throttle=-1; steerIn=k._revTurn; drift=false; } // back out hard
 
   driveKart(k,dt,steerIn,throttle,drift);
 
@@ -1221,9 +1278,20 @@ function loop(){
   }
   for(const k of GAME.karts){ try{ syncKart(k); }catch(e){} }
   if(GAME.local) updateCamera(dt);
+  updateHeadlight();
   fxTick(dt);
-  // recoil settle on viewmodel-less setup: nudge camera fov already handles feel
   renderer.render(scene,camera);
+}
+
+// kart headlight follows the local kart; only lit at night
+function updateHeadlight(){
+  const k=GAME.local;
+  if(CFG.tod==='night' && k && k.alive){
+    headingVec(k.yaw,_hd);
+    headlight.position.set(k.pos.x+_hd.x*1.6, k.y+1.3, k.pos.z+_hd.z*1.6);
+    headlightTarget.position.set(k.pos.x+_hd.x*22, k.y+0.4, k.pos.z+_hd.z*22);
+    headlight.intensity=2.4;
+  } else { headlight.intensity=0; }
 }
 
 // ============================================================
