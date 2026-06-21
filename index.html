@@ -973,7 +973,9 @@ function updateLocal(dt){
     if(keys['ArrowDown']||keys['KeyS'])throttle=-1;
     if(CFG.autoGas&&throttle===0)throttle=1;
   }
-  steerIn*=CFG.steer;
+  // chase cam looks down +heading; increasing yaw swings the nose toward screen-left,
+  // so negate the player's input to make right = right and left = left on screen.
+  steerIn = -steerIn * CFG.steer;
   const drift=driftHeld||keys['ShiftLeft']||keys['ShiftRight'];
   driveKart(k,dt,steerIn,throttle,drift);
   if(firing||fireQueued){ fireWeapon(k); fireQueued=false; }
